@@ -1,7 +1,7 @@
 #include <pspsdk.h>
 #include <pspkernel.h>
 #include <pspge.h>
-#include <pspgu.h>
+#include <pspdmac.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -759,15 +759,39 @@ int sceGeListSyncPatched(int qid, int syncType) {
   return _sceGeListSync(qid, syncType);
 }
 
-void copyFrameBuffer() {
-  *(u32 *)DRAW_NATIVE = 1;
+// based on old gu, bare minimal frame copying using GE
+static void ge_cmd(int *list, int cmd, int arg){
+	*list = (cmd << 24) | (arg & 0xffffff);
+}
+static void ge_copy(int *list, int psm, int sx, int sy, int width, int height, int srcw, void* src, int dx, int dy, int destw, void* dest){
+  int *list_head = list;
 
-  sceGuStart(0, (void *)(RENDER_LIST | 0xA0000000));
-  sceGuCopyImage(PIXELFORMAT, 0, 0, WIDTH, HEIGHT, PITCH,
-                 (void *)VRAM_DRAW_BUFFER_OFFSET,
-                 0, 0, PITCH, (void *)DISPLAY_BUFFER);
-  sceGuFinish();
-  _sceGeListEnQueue((void *)RENDER_LIST, NULL, 0, NULL);
+  list = (int *)((uint32_t)list | 0xA0000000);
+
+  // copying
+  ge_cmd(list++, 178,((unsigned int)src) & 0xffffff);
+  ge_cmd(list++, 179,((((unsigned int)src) & 0xff000000) >> 8)|srcw);
+  ge_cmd(list++, 235,(sy << 10)|sx);
+  ge_cmd(list++, 180,((unsigned int)dest) & 0xffffff);
+  ge_cmd(list++, 181,((((unsigned int)dest) & 0xff000000) >> 8)|destw);
+  ge_cmd(list++, 236,(dy << 10)|dx);
+  ge_cmd(list++, 238,((height-1) << 10)|(width-1));
+  ge_cmd(list++, 234,(psm ^ 0x03) ? 0 : 1);
+
+  // finish
+  ge_cmd(list++, 15, 0);
+  ge_cmd(list++, 12, 0);
+
+  _sceGeListEnQueue((void *)list_head, NULL, 0, NULL);
+}
+
+void copyFrameBuffer() {
+  #if 1
+  ge_copy((int *)RENDER_LIST, PIXELFORMAT, 0, 0, WIDTH, HEIGHT, PITCH, (void *)VRAM_DRAW_BUFFER_OFFSET, 0, 0, PITCH, (void *)DISPLAY_BUFFER);
+  #else
+  sceDmacMemcpy((void *)DISPLAY_BUFFER, (void *)VRAM_DRAW_BUFFER_OFFSET, WIDTH * HEIGHT * sizeof(uint16_t));
+  #endif
+  *(u32 *)DRAW_NATIVE = 1;
 }
 
 int sceGeDrawSyncPatched(int syncType) {
@@ -804,25 +828,25 @@ int draw_thread(SceSize args, void *argp) {
 }
 
 int module_start(SceSize args, void *argp) {
-  _sceGeEdramGetAddr = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0xE47E40E4);
-  _sceGeEdramGetSize = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x1F6752AD);
-  _sceGeGetList = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x67B01D8E);
-  _sceGeListUpdateStallAddr = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0xE0D68148);
-  _sceGeListEnQueue = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0xAB49E76A);
-  _sceGeListEnQueueHead = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x1C0D95A6);
-  _sceGeListSync = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x03444EB4);
-  _sceGeDrawSync = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0xB287BD61);
+  _sceGeEdramGetAddr = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0xE47E40E4);
+  _sceGeEdramGetSize = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0x1F6752AD);
+  _sceGeGetList = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0x67B01D8E);
+  _sceGeListUpdateStallAddr = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0xE0D68148);
+  _sceGeListEnQueue = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0xAB49E76A);
+  _sceGeListEnQueueHead = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0x1C0D95A6);
+  _sceGeListSync = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0x03444EB4);
+  _sceGeDrawSync = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0xB287BD61);
 
-  sctrlHENPatchSyscall((u32)_sceGeEdramGetAddr, sceGeEdramGetAddrPatched);
-  sctrlHENPatchSyscall((u32)_sceGeEdramGetSize, sceGeEdramGetSizePatched);
-  sctrlHENPatchSyscall((u32)_sceGeListUpdateStallAddr, sceGeListUpdateStallAddrPatched);
-  sctrlHENPatchSyscall((u32)_sceGeListEnQueue, sceGeListEnQueuePatched);
-  sctrlHENPatchSyscall((u32)_sceGeListEnQueueHead, sceGeListEnQueueHeadPatched);
-  // sctrlHENPatchSyscall((u32)_sceGeListSync, sceGeListSyncPatched);
-  sctrlHENPatchSyscall((u32)_sceGeDrawSync, sceGeDrawSyncPatched);
+  sctrlHENPatchSyscall(_sceGeEdramGetAddr, sceGeEdramGetAddrPatched);
+  sctrlHENPatchSyscall(_sceGeEdramGetSize, sceGeEdramGetSizePatched);
+  sctrlHENPatchSyscall(_sceGeListUpdateStallAddr, sceGeListUpdateStallAddrPatched);
+  sctrlHENPatchSyscall(_sceGeListEnQueue, sceGeListEnQueuePatched);
+  sctrlHENPatchSyscall(_sceGeListEnQueueHead, sceGeListEnQueueHeadPatched);
+  // sctrlHENPatchSyscall(_sceGeListSync, sceGeListSyncPatched);
+  sctrlHENPatchSyscall(_sceGeDrawSync, sceGeDrawSyncPatched);
 
-  _sceDisplaySetFrameBuf = (void *)FindProc("sceDisplay_Service", "sceDisplay_driver", 0x289D82FE);
-  sctrlHENPatchSyscall((u32)_sceDisplaySetFrameBuf, sceDisplaySetFrameBufPatched);
+  _sceDisplaySetFrameBuf = (void *)sctrlHENFindFunction("sceDisplay_Service", "sceDisplay_driver", 0x289D82FE);
+  sctrlHENPatchSyscall(_sceDisplaySetFrameBuf, sceDisplaySetFrameBufPatched);
 
   // SceUID thid = sceKernelCreateThread("draw_thread", draw_thread, 0x11, 0x4000, 0, NULL);
   // if (thid >= 0)
