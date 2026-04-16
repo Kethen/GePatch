@@ -22,7 +22,7 @@ PSP_MODULE_INFO("GePatch", 0x1007, 1, 0);
 #define FAKE_VRAM 0x0A000000
 #define DISPLAY_BUFFER 0x0A400000
 #define VERTICES_BUFFER 0x0A600000
-#define RENDER_LIST 0x0A800000
+#define COPY_RENDER_LIST 0x0A800000
 
 #define VRAM_DRAW_BUFFER_OFFSET 0x04000000
 #define VRAM_DEPTH_BUFFER_OFFSET 0x04100000
@@ -704,7 +704,8 @@ exit_loop:
 }
 
 void *(* _sceGeEdramGetAddr)(void);
-unsigned int *(* _sceGeEdramGetSize)(void);
+unsigned int (* _sceGeEdramGetSize)(void);
+int *(* _sceGeEdramSetSize)(int size);
 int (* _sceGeGetList)(int qid, void *list, int *flag);
 int (* _sceGeListUpdateStallAddr)(int qid, void *stall);
 int (* _sceGeListEnQueue)(const void *list, void *stall, int cbid, PspGeListArgs *arg);
@@ -719,6 +720,7 @@ void *sceGeEdramGetAddrPatched(void) {
 }
 
 unsigned int sceGeEdramGetSizePatched(void) {
+  //log("%s: real size %u\n", __func__, _sceGeEdramGetSize());
   return 4 * 1024 * 1024;
 }
 
@@ -763,6 +765,8 @@ int sceGeListSyncPatched(int qid, int syncType) {
 static void ge_cmd(int *list, int cmd, int arg){
 	*list = (cmd << 24) | (arg & 0xffffff);
 }
+
+#if 0
 static void ge_copy(int *list, int psm, int sx, int sy, int width, int height, int srcw, void* src, int dx, int dy, int destw, void* dest){
   int *list_head = list;
 
@@ -784,11 +788,42 @@ static void ge_copy(int *list, int psm, int sx, int sy, int width, int height, i
 
   _sceGeListEnQueue((void *)list_head, NULL, 0, NULL);
 }
+#endif
+
+static void init_ge_copy_list(){
+  int *list = (int *)(COPY_RENDER_LIST | 0xA0000000);
+  // copying
+  ge_cmd(list++, 178,((unsigned int)VRAM_DRAW_BUFFER_OFFSET) & 0xffffff);
+  ge_cmd(list++, 179,((((unsigned int)VRAM_DRAW_BUFFER_OFFSET) & 0xff000000) >> 8)|PITCH);
+  ge_cmd(list++, 235,(0 << 10)|0);
+  ge_cmd(list++, 180,((unsigned int)DISPLAY_BUFFER) & 0xffffff);
+  ge_cmd(list++, 181,((((unsigned int)DISPLAY_BUFFER) & 0xff000000) >> 8)|PITCH);
+  ge_cmd(list++, 236,(0 << 10)|0);
+  ge_cmd(list++, 238,((HEIGHT-1) << 10)|(WIDTH-1));
+  ge_cmd(list++, 234,(PIXELFORMAT ^ 0x03) ? 0 : 1);
+
+  // finish
+  ge_cmd(list++, 15, 0);
+  ge_cmd(list++, 12, 0);
+}
+
+static void run_ge_copy_list(){
+  static int initialized = 0;
+  if (!initialized){
+    init_ge_copy_list();
+    initialized = 1;
+  }
+  _sceGeListEnQueue((void *)COPY_RENDER_LIST, NULL, 0, NULL);
+}
 
 void copyFrameBuffer() {
   #if 1
-  ge_copy((int *)RENDER_LIST, PIXELFORMAT, 0, 0, WIDTH, HEIGHT, PITCH, (void *)VRAM_DRAW_BUFFER_OFFSET, 0, 0, PITCH, (void *)DISPLAY_BUFFER);
-  #else
+  run_ge_copy_list();
+  #endif
+  #if 0
+  ge_copy((int *)COPY_RENDER_LIST, PIXELFORMAT, 0, 0, WIDTH, HEIGHT, PITCH, (void *)VRAM_DRAW_BUFFER_OFFSET, 0, 0, PITCH, (void *)DISPLAY_BUFFER);
+  #endif
+  #if 0
   sceDmacMemcpy((void *)DISPLAY_BUFFER, (void *)VRAM_DRAW_BUFFER_OFFSET, WIDTH * HEIGHT * sizeof(uint16_t));
   #endif
   *(u32 *)DRAW_NATIVE = 1;
@@ -827,6 +862,49 @@ int draw_thread(SceSize args, void *argp) {
   return 0;
 }
 
+#define NOP 0
+#define MAKE_JUMP(a, f) _sw(0x08000000 | (((u32)(f) & 0x0FFFFFFC) >> 2), a)
+#define GET_JUMP_TARGET(x) (0x80000000 | (((x) & 0x03FFFFFF) << 2))
+// Davee's new 5 bytes chainable trampoline used in ARK cfw and RJL fork
+#define HIJACK_FUNCTION(a, f, p) \
+{ \
+	int _interrupts = pspSdkDisableInterrupts(); \
+	static u32 _pb_[5]; \
+	_sw(_lw((u32)(a)), (u32)_pb_); \
+	_sw(_lw((u32)(a) + 4), (u32)_pb_ + 4);\
+	_sw(NOP, (u32)_pb_ + 8);\
+	_sw(NOP, (u32)_pb_ + 16);\
+	MAKE_JUMP((u32)_pb_ + 12, (u32)(a) + 8); \
+	_sw(0x08000000 | (((u32)(f) >> 2) & 0x03FFFFFF), (u32)(a)); \
+	_sw(0, (u32)(a) + 4); \
+	p = (void *)_pb_; \
+	sceKernelDcacheWritebackInvalidateAll(); \
+	sceKernelIcacheClearAll(); \
+	pspSdkEnableInterrupts(_interrupts); \
+}
+
+#if 0
+int (*is_non_fat_orig)() = NULL;
+int is_non_fat(){
+	log("%s: pretending to be fat\n", __func__);
+	return 0;
+}
+
+int (*set_edram_size_orig)(int size) = NULL;
+int set_edram_size(int size){
+  // force 4
+  set_edram_size_orig(0x400000);
+  if (size == 0x200000){
+    return 0;
+  }
+  if (size == 0x400000){
+    // fake 1000 behavior to force the usable size to 2
+    return 0x80000104;
+  }
+  return 0x80000104;
+}
+#endif
+
 int module_start(SceSize args, void *argp) {
   _sceGeEdramGetAddr = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0xE47E40E4);
   _sceGeEdramGetSize = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0x1F6752AD);
@@ -836,6 +914,17 @@ int module_start(SceSize args, void *argp) {
   _sceGeListEnQueueHead = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0x1C0D95A6);
   _sceGeListSync = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0x03444EB4);
   _sceGeDrawSync = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0xB287BD61);
+
+  #if 0
+  void *is_non_fat_proc = (void *)sctrlHENFindFunction("scePower_Service", "scePower", 0xA85880D0);
+  HIJACK_FUNCTION(is_non_fat_proc, is_non_fat, is_non_fat_orig);
+
+
+  void *set_edram_size_proc = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0x5BAA5439);
+  HIJACK_FUNCTION(set_edram_size_proc, set_edram_size, set_edram_size_orig);
+  int edram_size_set_status = set_edram_size_orig(0x400000);
+  log("%s: edram set status 0x%x\n", __func__, edram_size_set_status);
+  #endif
 
   sctrlHENPatchSyscall(_sceGeEdramGetAddr, sceGeEdramGetAddrPatched);
   sctrlHENPatchSyscall(_sceGeEdramGetSize, sceGeEdramGetSizePatched);
@@ -854,6 +943,8 @@ int module_start(SceSize args, void *argp) {
 
   sceKernelDcacheWritebackInvalidateAll();
   sceKernelIcacheClearAll();
+
+  //log("%s: ready\n", __func__);
 
   return 0;
 }
