@@ -1,14 +1,10 @@
-#include <pspsdk.h>
-#include <pspkernel.h>
-#include <pspge.h>
-#include <pspdmac.h>
+#include "main.h"
 
 #include <stdio.h>
 #include <string.h>
 
-#include <systemctrl.h>
-
 #include "ge_constants.h"
+#include "game_workarounds.h"
 
 PSP_MODULE_INFO("GePatch", 0x1007, 1, 0);
 
@@ -30,19 +26,8 @@ PSP_MODULE_INFO("GePatch", 0x1007, 1, 0);
 
 #define FAKE_FAT 1
 
-#define ENABLE_LOGGING 1
-
 #if ENABLE_LOGGING
-#define log(...) \
-{ \
-  char _msg[256]; \
-  int _len = sprintf(_msg,__VA_ARGS__); \
-  logmsg(_msg, _len); \
-}
-
-#define LOG_FILE "ms0:/ge_patch.txt"
-
-static void logmsg(char *msg, int len) {
+void logmsg(char *msg, int len) {
   int k1 = pspSdkSetK1(0);
 
   SceUID fd = sceIoOpen(LOG_FILE, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_APPEND, 0777);
@@ -53,54 +38,15 @@ static void logmsg(char *msg, int len) {
 
   pspSdkSetK1(k1);
 }
-#else
-#define log(...)
 #endif
 
-static const u8 tcsize[4] = { 0, 2, 4, 8 }, tcalign[4] = { 0, 1, 2, 4 };
-static const u8 colsize[8] = { 0, 0, 0, 0, 2, 2, 2, 4 }, colalign[8] = { 0, 0, 0, 0, 2, 2, 2, 4 };
-static const u8 nrmsize[4] = { 0, 3, 6, 12 }, nrmalign[4] = { 0, 1, 2, 4 };
-static const u8 possize[4] = { 3, 3, 6, 12 }, posalign[4] = { 1, 1, 2, 4 };
-static const u8 wtsize[4] = { 0, 1, 2, 4 }, wtalign[4] = { 0, 1, 2, 4 };
+const u8 tcsize[4] = { 0, 2, 4, 8 }, tcalign[4] = { 0, 1, 2, 4 };
+const u8 colsize[8] = { 0, 0, 0, 0, 2, 2, 2, 4 }, colalign[8] = { 0, 0, 0, 0, 2, 2, 2, 4 };
+const u8 nrmsize[4] = { 0, 3, 6, 12 }, nrmalign[4] = { 0, 1, 2, 4 };
+const u8 possize[4] = { 3, 3, 6, 12 }, posalign[4] = { 1, 1, 2, 4 };
+const u8 wtsize[4] = { 0, 1, 2, 4 }, wtalign[4] = { 0, 1, 2, 4 };
 
 #define ALIGN(x, align) (((x) + ((align) - 1)) & ~((align) - 1))
-
-static const char * get_game_code(void)
-{
-  static const char *(*system_game_code_getter)() = NULL;
-  if (system_game_code_getter == NULL){
-    system_game_code_getter = (void *)sctrlHENFindFunction("sceSystemMemoryManager", "SysMemForKernel", 0xEF29061C);
-  }
-  return system_game_code_getter() + 0x44;
-}
-
-static int is_mhfu(){
-  static int cache = -1;
-  if (cache != -1){
-    return cache;
-  }
-  const char *mhfu_codes[] = {
-    // there should only be the EU, US and JP code, but just in case
-    "ULES01213",
-    "ULUS10391",
-    "NPHH00259",
-    "NPJH50244",
-    "ULAS42149",
-    "ULJM05500",
-    "ULJM08019",
-    "ULJM08025",
-    "ULKS46177"
-  };
-  const char *game_id = get_game_code();
-  for(int i = 0;i < sizeof(mhfu_codes) / sizeof(mhfu_codes[0]);i++){
-    if (strcmp(game_id, mhfu_codes[i]) == 0){
-      cache = 1;
-      return 1;
-    }
-  }
-  cache = 0;
-  return 0;
-}
 
 void getVertexInfo(u32 op, u8 *vertex_size, u8 *pos_off, u8 *visit_off) {
   int tc = (op & GE_VTYPE_TC_MASK) >> GE_VTYPE_TC_SHIFT;
@@ -221,42 +167,7 @@ void GetIndexBounds(const void *inds, int count, u32 vertType, u16 *indexLowerBo
   *indexUpperBound = (u16)upperBound;
 }
 
-typedef struct {
-  u32 list;
-  u32 offset;
-} StackEntry;
-
-typedef struct {
-  u32 ge_cmds[0x100];
-
-  u32 texbufptr[8];
-  u32 texbufwidth[8];
-  u32 framebufptr;
-  u32 framebufwidth;
-  u32 *framebufwidth_addr;
-
-  u32 base;
-  u32 offset;
-  u32 address;
-
-  u32 index_addr;
-  u32 vertex_addr;
-  u32 vertex_type;
-
-  u32 ignore_framebuf;
-  u32 ignore_texture;
-
-  u32 sync;
-  u32 finished;
-
-  StackEntry stack[64];
-  u32 curr_stack;
-
-  u32 framebuf_addr[16];
-  u32 framebuf_count;
-} GeState;
-
-static GeState state;
+GeState state;
 
 static int rendered_in_sync = 0;
 static int framebuf_set = 0;
@@ -438,25 +349,6 @@ u32 *handleControlFlowCommands(u32 *list) {
   return list;
 }
 
-
-static int is_mhfu_color_filter_prim(int vertex_count, int prim){
-  if (vertex_count != 4){
-    return 0;
-  }
-  if (state.vertex_type != 0x80011c){
-    return 0;
-  }
-  if (prim != GE_PRIM_TRIANGLE_STRIP){
-    return 0;
-  }
-  // what if it's not..? this is just the base address of the vertex buffer
-  // one of the issue is that it's really similar to other color boxes, might have to check the vertices if it conflicts with other things
-  if (state.base != 0x09000000){
-    return 0;
-  }
-  return 1;
-}
-
 void patchGeList(u32 *list, u32 *stall) {
   union {
     float f;
@@ -535,11 +427,13 @@ void patchGeList(u32 *list, u32 *stall) {
         u16 count = data & 0xffff;
         u16 prim = (data >> 16) & 7;
 
-        if (is_mhfu()){
-          if (is_mhfu_color_filter_prim(count, prim)){
-            *list = 0;
-            break;
-          }
+        enum GAME_WORKAROUND_ACTION fix_result = fix_prim(count, prim);
+        if (fix_result == GAME_WORKAROUND_ACTION_VERTICE_PROCESSED){
+          break;
+        }
+        if (fix_result == GAME_WORKAROUND_ACTION_NOP){
+          *list = 0;
+          break;
         }
 
         if ((state.vertex_type & GE_VTYPE_THROUGH_MASK) == GE_VTYPE_THROUGH) {
