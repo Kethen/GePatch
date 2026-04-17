@@ -40,15 +40,15 @@ void logmsg(char *msg, int len) {
 }
 #endif
 
-const u8 tcsize[4] = { 0, 2, 4, 8 }, tcalign[4] = { 0, 1, 2, 4 };
-const u8 colsize[8] = { 0, 0, 0, 0, 2, 2, 2, 4 }, colalign[8] = { 0, 0, 0, 0, 2, 2, 2, 4 };
-const u8 nrmsize[4] = { 0, 3, 6, 12 }, nrmalign[4] = { 0, 1, 2, 4 };
-const u8 possize[4] = { 3, 3, 6, 12 }, posalign[4] = { 1, 1, 2, 4 };
-const u8 wtsize[4] = { 0, 1, 2, 4 }, wtalign[4] = { 0, 1, 2, 4 };
+static const u8 tcsize[4] = { 0, 2, 4, 8 }, tcalign[4] = { 0, 1, 2, 4 };
+static const u8 colsize[8] = { 0, 0, 0, 0, 2, 2, 2, 4 }, colalign[8] = { 0, 0, 0, 0, 2, 2, 2, 4 };
+static const u8 nrmsize[4] = { 0, 3, 6, 12 }, nrmalign[4] = { 0, 1, 2, 4 };
+static const u8 possize[4] = { 3, 3, 6, 12 }, posalign[4] = { 1, 1, 2, 4 };
+static const u8 wtsize[4] = { 0, 1, 2, 4 }, wtalign[4] = { 0, 1, 2, 4 };
 
 #define ALIGN(x, align) (((x) + ((align) - 1)) & ~((align) - 1))
 
-void getVertexInfo(u32 op, u8 *vertex_size, u8 *pos_off, u8 *visit_off) {
+void getVertexInfo(u32 op, u8 *vertex_size, u8 *pos_off, u8 *visit_off, int *pos_size) {
   int tc = (op & GE_VTYPE_TC_MASK) >> GE_VTYPE_TC_SHIFT;
   int col = (op & GE_VTYPE_COL_MASK) >> GE_VTYPE_COL_SHIFT;
   int nrm = (op & GE_VTYPE_NRM_MASK) >> GE_VTYPE_NRM_SHIFT;
@@ -125,6 +125,7 @@ void getVertexInfo(u32 op, u8 *vertex_size, u8 *pos_off, u8 *visit_off) {
   *vertex_size = size;
   *pos_off = posoff;
   *visit_off = visitoff;
+  *pos_size = possize[pos] / 3;
 }
 
 void GetIndexBounds(const void *inds, int count, u32 vertType, u16 *indexLowerBound, u16 *indexUpperBound) {
@@ -390,7 +391,8 @@ void patchGeList(u32 *list, u32 *stall) {
           u32 count = num_points_u * num_points_v;
 
           u8 vertex_size = 0, pos_off = 0, visit_off = 0;
-          getVertexInfo(state.vertex_type, &vertex_size, &pos_off, &visit_off);
+          int pos_size;
+          getVertexInfo(state.vertex_type, &vertex_size, &pos_off, &visit_off, &pos_size);
 
           AdvanceVerts(count, vertex_size);
         }
@@ -407,7 +409,8 @@ void patchGeList(u32 *list, u32 *stall) {
           u32 count = data;
 
           u8 vertex_size = 0, pos_off = 0, visit_off = 0;
-          getVertexInfo(state.vertex_type, &vertex_size, &pos_off, &visit_off);
+          int pos_size = 0;
+          getVertexInfo(state.vertex_type, &vertex_size, &pos_off, &visit_off, &pos_size);
 
           AdvanceVerts(count, vertex_size);
         }
@@ -438,7 +441,8 @@ void patchGeList(u32 *list, u32 *stall) {
 
         if ((state.vertex_type & GE_VTYPE_THROUGH_MASK) == GE_VTYPE_THROUGH) {
           u8 vertex_size = 0, pos_off = 0, visit_off = 0;
-          getVertexInfo(state.vertex_type, &vertex_size, &pos_off, &visit_off);
+          int pos_size = 0;
+          getVertexInfo(state.vertex_type, &vertex_size, &pos_off, &visit_off, &pos_size);
 
           u16 lower = 0;
           u16 upper = count;
@@ -446,9 +450,6 @@ void patchGeList(u32 *list, u32 *stall) {
             GetIndexBounds((void *)state.index_addr, count, state.vertex_type, &lower, &upper);
             upper += 1;
           }
-
-          int pos = (state.vertex_type & GE_VTYPE_POS_MASK) >> GE_VTYPE_POS_SHIFT;
-          int pos_size = possize[pos] / 3;
 
           // TODO: we may patch the same vertex again and again...
           u8 decoded = 0, encoded = 0;

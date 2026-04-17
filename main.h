@@ -61,12 +61,6 @@ typedef struct {
 
 extern GeState state;
 
-extern const u8 tcsize[4], tcalign[4];
-extern const u8 colsize[8], colalign[8];
-extern const u8 nrmsize[4], nrmalign[4];
-extern const u8 possize[4], posalign[4];
-extern const u8 wtsize[4], wtalign[4];
-
-void getVertexInfo(u32 op, u8 *vertex_size, u8 *pos_off, u8 *visit_off);
+void getVertexInfo(u32 op, u8 *vertex_size, u8 *pos_off, u8 *visit_off, int *pos_size);
 
 #endif

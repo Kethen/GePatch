@@ -63,9 +63,8 @@ enum GAME_WORKAROUND_ACTION fix_mhfu_color_filter_prim(int vertex_count, int pri
     u8 vertex_size = 0;
     u8 pos_off = 0;
     u8 visit_off = 0;
-    getVertexInfo(state.vertex_type, &vertex_size, &pos_off, &visit_off);
-    int pos = (state.vertex_type & GE_VTYPE_POS_MASK) >> GE_VTYPE_POS_SHIFT;
-    int pos_size = possize[pos] / 3;
+    int pos_size = 0;
+    getVertexInfo(state.vertex_type, &vertex_size, &pos_off, &visit_off, &pos_size);
 
     static const s16 expectations[] = {
         0, 0,
