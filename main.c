@@ -28,25 +28,34 @@ PSP_MODULE_INFO("GePatch", 0x1007, 1, 0);
 #define VRAM_DEPTH_BUFFER_OFFSET 0x04100000
 #define VRAM_1KB 0x041ff000
 
+#define FAKE_FAT 1
+
+#define ENABLE_LOGGING 1
+
+#if ENABLE_LOGGING
 #define log(...) \
 { \
-  char msg[256]; \
-  sprintf(msg,__VA_ARGS__); \
-  logmsg(msg); \
+  char _msg[256]; \
+  int _len = sprintf(_msg,__VA_ARGS__); \
+  logmsg(_msg, _len); \
 }
 
-void logmsg(char *msg) {
+#define LOG_FILE "ms0:/ge_patch.txt"
+
+static void logmsg(char *msg, int len) {
   int k1 = pspSdkSetK1(0);
 
-  SceUID fd = sceIoOpen("ms0:/ge_patch.txt", PSP_O_WRONLY | PSP_O_CREAT, 0777);
+  SceUID fd = sceIoOpen(LOG_FILE, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_APPEND, 0777);
   if (fd >= 0) {
-    sceIoLseek(fd, 0, PSP_SEEK_END);
-    sceIoWrite(fd, msg, strlen(msg));
+    sceIoWrite(fd, msg, len);
     sceIoClose(fd);
   }
 
   pspSdkSetK1(k1);
 }
+#else
+#define log(...)
+#endif
 
 static const u8 tcsize[4] = { 0, 2, 4, 8 }, tcalign[4] = { 0, 1, 2, 4 };
 static const u8 colsize[8] = { 0, 0, 0, 0, 2, 2, 2, 4 }, colalign[8] = { 0, 0, 0, 0, 2, 2, 2, 4 };
@@ -55,6 +64,43 @@ static const u8 possize[4] = { 3, 3, 6, 12 }, posalign[4] = { 1, 1, 2, 4 };
 static const u8 wtsize[4] = { 0, 1, 2, 4 }, wtalign[4] = { 0, 1, 2, 4 };
 
 #define ALIGN(x, align) (((x) + ((align) - 1)) & ~((align) - 1))
+
+static const char * get_game_code(void)
+{
+  static const char *(*system_game_code_getter)() = NULL;
+  if (system_game_code_getter == NULL){
+    system_game_code_getter = (void *)sctrlHENFindFunction("sceSystemMemoryManager", "SysMemForKernel", 0xEF29061C);
+  }
+  return system_game_code_getter() + 0x44;
+}
+
+static int is_mhfu(){
+  static int cache = -1;
+  if (cache != -1){
+    return cache;
+  }
+  const char *mhfu_codes[] = {
+    // there should only be the EU, US and JP code, but just in case
+    "ULES01213",
+    "ULUS10391",
+    "NPHH00259",
+    "NPJH50244",
+    "ULAS42149",
+    "ULJM05500",
+    "ULJM08019",
+    "ULJM08025",
+    "ULKS46177"
+  };
+  const char *game_id = get_game_code();
+  for(int i = 0;i < sizeof(mhfu_codes) / sizeof(mhfu_codes[0]);i++){
+    if (strcmp(game_id, mhfu_codes[i]) == 0){
+      cache = 1;
+      return 1;
+    }
+  }
+  cache = 0;
+  return 0;
+}
 
 void getVertexInfo(u32 op, u8 *vertex_size, u8 *pos_off, u8 *visit_off) {
   int tc = (op & GE_VTYPE_TC_MASK) >> GE_VTYPE_TC_SHIFT;
@@ -392,6 +438,25 @@ u32 *handleControlFlowCommands(u32 *list) {
   return list;
 }
 
+
+static int is_mhfu_color_filter_prim(int vertex_count, int prim){
+  if (vertex_count != 4){
+    return 0;
+  }
+  if (state.vertex_type != 0x80011c){
+    return 0;
+  }
+  if (prim != GE_PRIM_TRIANGLE_STRIP){
+    return 0;
+  }
+  // what if it's not..? this is just the base address of the vertex buffer
+  // one of the issue is that it's really similar to other color boxes, might have to check the vertices if it conflicts with other things
+  if (state.base != 0x09000000){
+    return 0;
+  }
+  return 1;
+}
+
 void patchGeList(u32 *list, u32 *stall) {
   union {
     float f;
@@ -467,9 +532,17 @@ void patchGeList(u32 *list, u32 *stall) {
           break;
         }
 
-        if ((state.vertex_type & GE_VTYPE_THROUGH_MASK) == GE_VTYPE_THROUGH) {
-          u16 count = data & 0xffff;
+        u16 count = data & 0xffff;
+        u16 prim = (data >> 16) & 7;
 
+        if (is_mhfu()){
+          if (is_mhfu_color_filter_prim(count, prim)){
+            *list = 0;
+            break;
+          }
+        }
+
+        if ((state.vertex_type & GE_VTYPE_THROUGH_MASK) == GE_VTYPE_THROUGH) {
           u8 vertex_size = 0, pos_off = 0, visit_off = 0;
           getVertexInfo(state.vertex_type, &vertex_size, &pos_off, &visit_off);
 
@@ -721,7 +794,11 @@ void *sceGeEdramGetAddrPatched(void) {
 
 unsigned int sceGeEdramGetSizePatched(void) {
   //log("%s: real size %u\n", __func__, _sceGeEdramGetSize());
+  #if FAKE_FAT
+  return 2 * 1024 * 1024;
+  #else
   return 4 * 1024 * 1024;
+  #endif
 }
 
 int sceGeListUpdateStallAddrPatched(int qid, void *stall) {
@@ -883,22 +960,20 @@ int draw_thread(SceSize args, void *argp) {
 	pspSdkEnableInterrupts(_interrupts); \
 }
 
-#if 0
+#if FAKE_FAT
 int (*is_non_fat_orig)() = NULL;
 int is_non_fat(){
-	log("%s: pretending to be fat\n", __func__);
-	return 0;
+  log("%s: pretending to be fat\n", __func__);
+  return 0;
 }
 
 int (*set_edram_size_orig)(int size) = NULL;
 int set_edram_size(int size){
-  // force 4
-  set_edram_size_orig(0x400000);
+  log("%s: faking fat behavior in case some Vitas actually has 4MB\n", __func__);
   if (size == 0x200000){
     return 0;
   }
   if (size == 0x400000){
-    // fake 1000 behavior to force the usable size to 2
     return 0x80000104;
   }
   return 0x80000104;
@@ -906,6 +981,13 @@ int set_edram_size(int size){
 #endif
 
 int module_start(SceSize args, void *argp) {
+  #if ENABLE_LOGGING
+  SceUID fd = sceIoOpen(LOG_FILE, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+  if (fd >= 0) {
+    sceIoClose(fd);
+  }
+  #endif
+
   _sceGeEdramGetAddr = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0xE47E40E4);
   _sceGeEdramGetSize = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0x1F6752AD);
   _sceGeGetList = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0x67B01D8E);
@@ -915,15 +997,12 @@ int module_start(SceSize args, void *argp) {
   _sceGeListSync = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0x03444EB4);
   _sceGeDrawSync = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0xB287BD61);
 
-  #if 0
+  #if FAKE_FAT
   void *is_non_fat_proc = (void *)sctrlHENFindFunction("scePower_Service", "scePower", 0xA85880D0);
   HIJACK_FUNCTION(is_non_fat_proc, is_non_fat, is_non_fat_orig);
 
-
   void *set_edram_size_proc = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0x5BAA5439);
   HIJACK_FUNCTION(set_edram_size_proc, set_edram_size, set_edram_size_orig);
-  int edram_size_set_status = set_edram_size_orig(0x400000);
-  log("%s: edram set status 0x%x\n", __func__, edram_size_set_status);
   #endif
 
   sctrlHENPatchSyscall(_sceGeEdramGetAddr, sceGeEdramGetAddrPatched);
@@ -944,7 +1023,7 @@ int module_start(SceSize args, void *argp) {
   sceKernelDcacheWritebackInvalidateAll();
   sceKernelIcacheClearAll();
 
-  //log("%s: ready\n", __func__);
+  log("%s: ready\n", __func__);
 
   return 0;
 }
