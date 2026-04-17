@@ -392,6 +392,37 @@ u32 *handleControlFlowCommands(u32 *list) {
   return list;
 }
 
+int is_mhfu_color_filter_prim(int vertex_count, int prim){
+  if (vertex_count != 4){
+    return 0;
+  }
+  if (state.vertex_type != 0x80011c){
+    return 0;
+  }
+  if (prim != GE_PRIM_TRIANGLE_STRIP){
+    return 0;
+  }
+  // what if it's not..? this is just the base address of the vertex buffer
+  // one of the issue is that it's really similar to other color boxes, might have to check the vertices if it conflicts with other things
+  if (state.base != 0x09000000){
+    return 0;
+  }
+  return 1;
+}
+
+int is_mhfu_rain_prim(int vertex_count, int prim){
+  if (vertex_count != 4 && vertex_count != 3){
+    return 0;
+  }
+  if (state.vertex_type != 0x902){
+    return 0;
+  }
+  if (prim != GE_PRIM_TRIANGLE_STRIP && prim != GE_PRIM_TRIANGLES){
+    return 0;
+  }
+  return 1;
+}
+
 void patchGeList(u32 *list, u32 *stall) {
   union {
     float f;
@@ -467,8 +498,19 @@ void patchGeList(u32 *list, u32 *stall) {
           break;
         }
 
+        u16 count = data & 0xffff;
+        u16 prim = (data >> 16) & 7;
+
+        if (
+          is_mhfu_color_filter_prim(count, prim) ||
+          is_mhfu_rain_prim(count, prim)
+        ){
+          *list = 0;
+          break;
+        }
+
         if ((state.vertex_type & GE_VTYPE_THROUGH_MASK) == GE_VTYPE_THROUGH) {
-          u16 count = data & 0xffff;
+
 
           u8 vertex_size = 0, pos_off = 0, visit_off = 0;
           getVertexInfo(state.vertex_type, &vertex_size, &pos_off, &visit_off);
@@ -498,6 +540,7 @@ void patchGeList(u32 *list, u32 *stall) {
                   if (val != 0) {
                     // Decode and check if we already doubled at least one of the vertices
                     // If that's the case, let's assume all other vertices have been doubled, too
+                    #if 1
                     if (!decoded && visit_off && upper - i >= 2) {
                       if (*(u8 *)(vertex_addr + visit_off + 0 * vertex_size) == ((val >> 0) & 0xff) &&
                           *(u8 *)(vertex_addr + visit_off + 1 * vertex_size) == ((val >> 8) & 0xff)) {
@@ -505,6 +548,7 @@ void patchGeList(u32 *list, u32 *stall) {
                       }
                       decoded = 1;
                     }
+                    #endif
 
                     if (val == 480 || val == 960)
                       *(short *)addr = 960;
@@ -514,12 +558,14 @@ void patchGeList(u32 *list, u32 *stall) {
                       *(short *)addr *= 2;
 
                     // Encode that we already doubled one of the vertices
+                    #if 1
                     if (!encoded && visit_off && upper - i >= 2) {
                       val = *(short *)addr;
                       *(u8 *)(vertex_addr + visit_off + 0 * vertex_size) = (val >> 0) & 0xff;
                       *(u8 *)(vertex_addr + visit_off + 1 * vertex_size) = (val >> 8) & 0xff;
                       encoded = 1;
                     }
+                    #endif
                   }
                   break;
                 }
