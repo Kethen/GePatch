@@ -63,4 +63,6 @@ extern GeState state;
 
 void getVertexInfo(u32 op, u8 *vertex_size, u8 *pos_off, u8 *visit_off, int *pos_size);
 
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof(a[0]))
+
 #endif

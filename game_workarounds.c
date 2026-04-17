@@ -41,7 +41,7 @@ static int is_mhfu(){
     return 0;
 }
 
-enum GAME_WORKAROUND_ACTION fix_mhfu_color_filter_prim(int vertex_count, int prim){
+static enum GAME_WORKAROUND_ACTION fix_mhfu_color_filter_prim(int vertex_count, int prim){
     if (vertex_count != 4){
         return GAME_WORKAROUND_ACTION_VERTICE_NOT_PROCESSED;
     }
@@ -53,13 +53,14 @@ enum GAME_WORKAROUND_ACTION fix_mhfu_color_filter_prim(int vertex_count, int pri
     }
 
     #if 0
-    // this check works on the EU version, not sure if it works on other versions
+    // this check works on the US version, not sure if it works on other versions
     // one of the issue is that it's really similar to other color boxes, might have to check the vertices if it conflicts with other things
     if (state.base != 0x09000000){
         return GAME_WORKAROUND_ACTION_VERTICE_NOT_PROCESSED;
     }
     #endif
 
+    #if 1
     u8 vertex_size = 0;
     u8 pos_off = 0;
     u8 visit_off = 0;
@@ -93,11 +94,15 @@ enum GAME_WORKAROUND_ACTION fix_mhfu_color_filter_prim(int vertex_count, int pri
         vertex_addr += vertex_size;
     }
 
+    #endif
+
     #if 1
-    // not sure why it'll only draw up to half the screen in height... perhaps a limit to through mode color vertex triangle strips?
+    // not sure why it'll only draw up to half the screen in height, no matter how I move the lower vertices... perhaps a limit to through mode color vertex triangle strips?
     // in dimmed areas games doesn't look good without the filter, but having half the screen in night mode is even worse
     return GAME_WORKAROUND_ACTION_NOP;
-    #else
+    #endif
+
+    #if 0
     offset = 0;
     vertex_addr = state.vertex_addr;
     for(int i = 0;i < 4;i++){
@@ -108,20 +113,40 @@ enum GAME_WORKAROUND_ACTION fix_mhfu_color_filter_prim(int vertex_count, int pri
         }
         vertex_addr += vertex_size;
     }
-    #endif
+
     return GAME_WORKAROUND_ACTION_VERTICE_PROCESSED;
+    #endif
+}
+
+static enum GAME_WORKAROUND_ACTION disable_effects_mhfu_prim(int vertex_count, int prim){
+    if (vertex_count < 3){
+        return GAME_WORKAROUND_ACTION_VERTICE_NOT_PROCESSED;
+    }
+    if (
+        state.vertex_type != 0x902 /* u16 tex cords, s16 pos, u8 indice, usually fullscreen effects and 2d fire */ &&
+        //state.vertex_type != 0x91a /* u16 tex cords, abgr4444 colors, s16 pos, u8 indice, usually background dust, but sometimes the floor itself */ &&
+        state.vertex_type != 0x922 /* u16 tex cords, s8 normals, s16 pos, u8 indice, usually shadow and dust */
+    ){
+        return GAME_WORKAROUND_ACTION_VERTICE_NOT_PROCESSED;
+    }
+    if (prim != GE_PRIM_TRIANGLE_STRIP && prim != GE_PRIM_TRIANGLES){
+        return GAME_WORKAROUND_ACTION_VERTICE_NOT_PROCESSED;
+    }
+    return GAME_WORKAROUND_ACTION_NOP;
 }
 
 enum GAME_WORKAROUND_ACTION fix_prim(int vertex_count, int prim){
     if (is_mhfu()){
-        #define FIX(func) { \
-            int fix_result = func(vertex_count, prim); \
-            if (fix_result != GAME_WORKAROUND_ACTION_VERTICE_NOT_PROCESSED) { \
-                return fix_result; \
-            } \
+        static const enum GAME_WORKAROUND_ACTION (*fix_list[])(int vertex_count, int prim) = {
+            disable_effects_mhfu_prim,
+            fix_mhfu_color_filter_prim
+        };
+        for(int i = 0;i < ARRAY_SIZE(fix_list);i++){
+            int fix_result = fix_list[i](vertex_count, prim);
+            if (fix_result != GAME_WORKAROUND_ACTION_VERTICE_NOT_PROCESSED){
+                return fix_result;
+            }
         }
-        FIX(fix_mhfu_color_filter_prim);
-        #undef FIX
     }
     return GAME_WORKAROUND_ACTION_VERTICE_NOT_PROCESSED;
 }
