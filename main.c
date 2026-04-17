@@ -2,6 +2,7 @@
 #include <pspkernel.h>
 #include <pspge.h>
 #include <pspdmac.h>
+#include <pspsysreg.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -25,9 +26,12 @@ PSP_MODULE_INFO("GePatch", 0x1007, 1, 0);
 #define COPY_RENDER_LIST 0x0A800000
 
 #define VRAM_DRAW_BUFFER_OFFSET 0x04000000
-#define VRAM_DEPTH_BUFFER_OFFSET 0x04100000
+#define VRAM_DEPTH_BUFFER_OFFSET 0x04200000
 #define VRAM_1KB 0x041ff000
 
+#define ENABLE_LOG 1
+
+#if ENABLE_LOG
 #define log(...) \
 { \
   char msg[256]; \
@@ -35,10 +39,10 @@ PSP_MODULE_INFO("GePatch", 0x1007, 1, 0);
   logmsg(msg); \
 }
 
-void logmsg(char *msg) {
+static void logmsg(char *msg) {
   int k1 = pspSdkSetK1(0);
 
-  SceUID fd = sceIoOpen("ms0:/ge_patch.txt", PSP_O_WRONLY | PSP_O_CREAT, 0777);
+  SceUID fd = sceIoOpen("ms0:/ge_patch.txt", PSP_O_WRONLY | PSP_O_CREAT | PSP_O_APPEND, 0777);
   if (fd >= 0) {
     sceIoLseek(fd, 0, PSP_SEEK_END);
     sceIoWrite(fd, msg, strlen(msg));
@@ -47,6 +51,11 @@ void logmsg(char *msg) {
 
   pspSdkSetK1(k1);
 }
+#else
+#define log(...)
+#endif
+
+
 
 static const u8 tcsize[4] = { 0, 2, 4, 8 }, tcalign[4] = { 0, 1, 2, 4 };
 static const u8 colsize[8] = { 0, 0, 0, 0, 2, 2, 2, 4 }, colalign[8] = { 0, 0, 0, 0, 2, 2, 2, 4 };
@@ -721,7 +730,7 @@ void *sceGeEdramGetAddrPatched(void) {
 
 unsigned int sceGeEdramGetSizePatched(void) {
   //log("%s: real size %u\n", __func__, _sceGeEdramGetSize());
-  return 4 * 1024 * 1024;
+  return 2 * 1024 * 1024;
 }
 
 int sceGeListUpdateStallAddrPatched(int qid, void *stall) {
@@ -883,15 +892,14 @@ int draw_thread(SceSize args, void *argp) {
 	pspSdkEnableInterrupts(_interrupts); \
 }
 
-#if 0
-int (*is_non_fat_orig)() = NULL;
-int is_non_fat(){
+static int (*is_non_fat_orig)() = NULL;
+static int is_non_fat(){
 	log("%s: pretending to be fat\n", __func__);
 	return 0;
 }
 
-int (*set_edram_size_orig)(int size) = NULL;
-int set_edram_size(int size){
+static int (*set_edram_size_orig)(int size) = NULL;
+static int set_edram_size(int size){
   // force 4
   set_edram_size_orig(0x400000);
   if (size == 0x200000){
@@ -903,9 +911,24 @@ int set_edram_size(int size){
   }
   return 0x80000104;
 }
-#endif
+
+static int fake_tachyon_version = 0;
+static int (*get_tachyon_version_orig)() = NULL;
+static int get_tachyon_version(){
+  if (fake_tachyon_version){
+    return 0xff00000;
+  }
+  return get_tachyon_version_orig();
+}
 
 int module_start(SceSize args, void *argp) {
+  #if ENABLE_LOG
+  int fd = sceIoOpen("ms0:/ge_patch.txt", PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+  if (fd >= 0){
+    sceIoClose(fd);
+  }
+  #endif
+
   _sceGeEdramGetAddr = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0xE47E40E4);
   _sceGeEdramGetSize = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0x1F6752AD);
   _sceGeGetList = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0x67B01D8E);
@@ -915,14 +938,17 @@ int module_start(SceSize args, void *argp) {
   _sceGeListSync = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0x03444EB4);
   _sceGeDrawSync = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0xB287BD61);
 
-  #if 0
+  #if 1
+  HIJACK_FUNCTION(GET_JUMP_TARGET(*(uint32_t*)sceSysregGetTachyonVersion), get_tachyon_version, get_tachyon_version_orig);
+
   void *is_non_fat_proc = (void *)sctrlHENFindFunction("scePower_Service", "scePower", 0xA85880D0);
   HIJACK_FUNCTION(is_non_fat_proc, is_non_fat, is_non_fat_orig);
 
-
   void *set_edram_size_proc = (void *)sctrlHENFindFunction("sceGE_Manager", "sceGe_driver", 0x5BAA5439);
   HIJACK_FUNCTION(set_edram_size_proc, set_edram_size, set_edram_size_orig);
+  fake_tachyon_version = 1;
   int edram_size_set_status = set_edram_size_orig(0x400000);
+  fake_tachyon_version = 0;
   log("%s: edram set status 0x%x\n", __func__, edram_size_set_status);
   #endif
 
@@ -944,7 +970,7 @@ int module_start(SceSize args, void *argp) {
   sceKernelDcacheWritebackInvalidateAll();
   sceKernelIcacheClearAll();
 
-  //log("%s: ready\n", __func__);
+  log("%s: ready\n", __func__);
 
   return 0;
 }
